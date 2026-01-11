@@ -1,5 +1,6 @@
 import os
 import zipfile
+import re
 
 import aiofiles
 import httpx
@@ -48,13 +49,35 @@ async def fetch_data_stream(url: str, request:Request , headers: dict = None, fi
                     await out_file.write(chunk)
             return True
 
+
+# 清理文件名中的非法字符
+def sanitize_filename(filename: str) -> str:
+    """
+    清理文件名，移除或替换非法字符
+    """
+    # 移除或替换Windows和Unix系统中的非法字符
+    illegal_chars = r'[<>:"/\\|?*]'
+    # 将非法字符替换为下划线
+    filename = re.sub(illegal_chars, '_', filename)
+    # 移除前后空格
+    filename = filename.strip()
+    # 限制文件名长度（避免过长）
+    if len(filename) > 200:
+        filename = filename[:200]
+    # 如果清理后为空，使用默认名称
+    if not filename:
+        filename = "video"
+    return filename
+
+
 @router.get("/download", summary="在线下载抖音|TikTok视频/图片/Online download Douyin|TikTok video/image")
 async def download_file_hybrid(request: Request,
                                url: str = Query(
                                    example="https://www.douyin.com/video/7372484719365098803",
                                    description="视频或图片的URL地址，也支持抖音|TikTok的分享链接，例如：https://v.douyin.com/e4J8Q7A/"),
                                prefix: bool = True,
-                               with_watermark: bool = False):
+                               with_watermark: bool = False,
+                               naming: str = Query(None, description="自定义文件名（不含扩展名），如果提供则覆盖默认命名")):
     """
     # [中文]
     ### 用途:
@@ -66,6 +89,7 @@ async def download_file_hybrid(request: Request,
     - url: 视频或图片的URL地址，也支持抖音|TikTok的分享链接，例如：https://v.douyin.com/e4J8Q7A/。
     - prefix: 下载文件的前缀，默认为True，可以在配置文件中修改。
     - with_watermark: 是否下载带水印的视频或图片，默认为False。
+    - naming: 自定义文件名（不含扩展名），如果提供则覆盖默认命名规则。
     ### 返回:
     - 返回下载的视频或图片文件响应。
 
@@ -79,11 +103,13 @@ async def download_file_hybrid(request: Request,
     - url: The URL address of the video or image, also supports Douyin|TikTok sharing links, for example: https://v.douyin.com/e4J8Q7A/.
     - prefix: The prefix of the downloaded file, the default is True, and can be modified in the configuration file.
     - with_watermark: Whether to download videos or images with watermarks, the default is False.
+    - naming: Custom filename (without extension), if provided, it will override the default naming rule.
     ### Returns:
     - Return the response of the downloaded video or image file.
 
     # [示例/Example]
     url: https://www.douyin.com/video/7372484719365098803
+    naming: 我的视频 (optional)
     """
     # 是否开启此端点/Whether to enable this endpoint
     if not config["API"]["Download_Switch"]:
@@ -112,10 +138,20 @@ async def download_file_hybrid(request: Request,
 
         # 下载视频文件/Download video file
         if data_type == 'video':
-            file_name = f"{file_prefix}{platform}_{aweme_id}.mp4" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_watermark.mp4"
+            # 如果提供了自定义文件名，使用自定义文件名；否则使用默认命名
+            if naming:
+                # 清理自定义文件名
+                clean_naming = sanitize_filename(naming)
+                file_name = f"{clean_naming}.mp4"
+                # 存储文件时使用ID作为文件名以避免冲突
+                storage_file_name = f"{file_prefix}{platform}_{aweme_id}.mp4" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_watermark.mp4"
+            else:
+                file_name = f"{file_prefix}{platform}_{aweme_id}.mp4" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_watermark.mp4"
+                storage_file_name = file_name
+            
             url = data.get('video_data').get('nwm_video_url_HQ') if not with_watermark else data.get('video_data').get(
                 'wm_video_url_HQ')
-            file_path = os.path.join(download_path, file_name)
+            file_path = os.path.join(download_path, storage_file_name)
 
             # 判断文件是否存在，存在就直接返回
             if os.path.exists(file_path):
@@ -123,7 +159,6 @@ async def download_file_hybrid(request: Request,
 
             # 获取视频文件
             __headers = await HybridCrawler.TikTokWebCrawler.get_tiktok_headers() if platform == 'tiktok' else await HybridCrawler.DouyinWebCrawler.get_douyin_headers()
-            # response = await fetch_data(url, headers=__headers)
 
             success = await fetch_data_stream(url, request, headers=__headers, file_path=file_path)
             if not success:
@@ -132,20 +167,25 @@ async def download_file_hybrid(request: Request,
                     detail="An error occurred while fetching data"
                 )
 
-            # # 保存文件
-            # async with aiofiles.open(file_path, 'wb') as out_file:
-            #     await out_file.write(response.content)
-
-            # 返回文件内容
+            # 返回文件内容，使用自定义文件名
             return FileResponse(path=file_path, filename=file_name, media_type="video/mp4")
 
         # 下载图片文件/Download image file
         elif data_type == 'image':
-            # 压缩文件属性/Compress file properties
-            zip_file_name = f"{file_prefix}{platform}_{aweme_id}_images.zip" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_images_watermark.zip"
-            zip_file_path = os.path.join(download_path, zip_file_name)
+            # 如果提供了自定义文件名，使用自定义文件名；否则使用默认命名
+            if naming:
+                # 清理自定义文件名
+                clean_naming = sanitize_filename(naming)
+                zip_file_name = f"{clean_naming}.zip"
+                # 存储文件时使用ID作为文件名以避免冲突
+                storage_zip_file_name = f"{file_prefix}{platform}_{aweme_id}_images.zip" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_images_watermark.zip"
+            else:
+                zip_file_name = f"{file_prefix}{platform}_{aweme_id}_images.zip" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_images_watermark.zip"
+                storage_zip_file_name = zip_file_name
+            
+            zip_file_path = os.path.join(download_path, storage_zip_file_name)
 
-            # 判断文件是否存在，存在就直接返回、
+            # 判断文件是否存在，存在就直接返回
             if os.path.exists(zip_file_path):
                 return FileResponse(path=zip_file_path, filename=zip_file_name, media_type="application/zip")
 
@@ -159,8 +199,8 @@ async def download_file_hybrid(request: Request,
                 index = int(urls.index(url))
                 content_type = response.headers.get('content-type')
                 file_format = content_type.split('/')[1]
-                file_name = f"{file_prefix}{platform}_{aweme_id}_{index + 1}.{file_format}" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_{index + 1}_watermark.{file_format}"
-                file_path = os.path.join(download_path, file_name)
+                file_name_temp = f"{file_prefix}{platform}_{aweme_id}_{index + 1}.{file_format}" if not with_watermark else f"{file_prefix}{platform}_{aweme_id}_{index + 1}_watermark.{file_format}"
+                file_path = os.path.join(download_path, file_name_temp)
                 image_file_list.append(file_path)
 
                 # 保存文件/Save file
@@ -172,7 +212,7 @@ async def download_file_hybrid(request: Request,
                 for image_file in image_file_list:
                     zip_file.write(image_file, os.path.basename(image_file))
 
-            # 返回压缩文件/Return compressed file
+            # 返回压缩文件，使用自定义文件名
             return FileResponse(path=zip_file_path, filename=zip_file_name, media_type="application/zip")
 
     # 异常处理/Exception handling
