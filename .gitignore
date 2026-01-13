@@ -132,3 +132,4 @@ dmypy.json
 .idea
 /app/api/endpoints/download/
 /download/
+app/web/views/ParseVideo - 副本.py

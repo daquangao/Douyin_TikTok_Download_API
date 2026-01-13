@@ -23,7 +23,9 @@ async def fetch_data(url: str, headers: dict = None):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     } if headers is None else headers.get('headers')
-    async with httpx.AsyncClient() as client:
+    
+    # 添加重定向支持和超时设置
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
         response = await client.get(url, headers=headers)
         response.raise_for_status()  # 确保响应是成功的
         return response
@@ -33,7 +35,9 @@ async def fetch_data_stream(url: str, request:Request , headers: dict = None, fi
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     } if headers is None else headers.get('headers')
-    async with httpx.AsyncClient() as client:
+    
+    # 创建支持重定向的客户端，设置超时时间
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
         # 启用流式请求
         async with client.stream("GET", url, headers=headers) as response:
             response.raise_for_status()
