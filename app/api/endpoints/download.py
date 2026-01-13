@@ -78,19 +78,20 @@ def sanitize_filename(filename: str) -> str:
 async def download_file_hybrid(request: Request,
                                url: str = Query(
                                    example="https://www.douyin.com/video/7372484719365098803",
-                                   description="视频或图片的URL地址，也支持抖音|TikTok的分享链接，例如：https://v.douyin.com/e4J8Q7A/"),
+                                   description="视频或图片的URL地址，支持抖音|TikTok|Bilibili的分享链接，例如：https://v.douyin.com/e4J8Q7A/ 或 https://www.bilibili.com/video/BV1xxxxxxxxx"),
                                prefix: bool = True,
                                with_watermark: bool = False,
                                naming: str = Query(None, description="自定义文件名（不含扩展名），如果提供则覆盖默认命名")):
     """
     # [中文]
     ### 用途:
-    - 在线下载抖音|TikTok 无水印或有水印的视频/图片
+    - 在线下载抖音|TikTok|Bilibili 无水印或有水印的视频/图片
     - 通过传入的视频URL参数，获取对应的视频或图片数据，然后下载到本地。
     - 如果你在尝试直接访问TikTok单一视频接口的JSON数据中的视频播放地址时遇到HTTP403错误，那么你可以使用此接口来下载视频。
+    - Bilibili视频会自动合并视频流和音频流，确保下载的视频有声音。
     - 这个接口会占用一定的服务器资源，所以在Demo站点是默认关闭的，你可以在本地部署后调用此接口。
     ### 参数:
-    - url: 视频或图片的URL地址，也支持抖音|TikTok的分享链接，例如：https://v.douyin.com/e4J8Q7A/。
+    - url: 视频或图片的URL地址，支持抖音|TikTok|Bilibili的分享链接，例如：https://v.douyin.com/e4J8Q7A/ 或 https://www.bilibili.com/video/BV1xxxxxxxxx
     - prefix: 下载文件的前缀，默认为True，可以在配置文件中修改。
     - with_watermark: 是否下载带水印的视频或图片，默认为False。
     - naming: 自定义文件名（不含扩展名），如果提供则覆盖默认命名规则。
@@ -99,12 +100,13 @@ async def download_file_hybrid(request: Request,
 
     # [English]
     ### Purpose:
-    - Download Douyin|TikTok video/image with or without watermark online.
+    - Download Douyin|TikTok|Bilibili video/image with or without watermark online.
     - By passing the video URL parameter, get the corresponding video or image data, and then download it to the local.
     - If you encounter an HTTP403 error when trying to access the video playback address in the JSON data of the TikTok single video interface directly, you can use this interface to download the video.
+    - Bilibili videos will automatically merge video and audio streams to ensure downloaded videos have sound.
     - This interface will occupy a certain amount of server resources, so it is disabled by default on the Demo site, you can call this interface after deploying it locally.
     ### Parameters:
-    - url: The URL address of the video or image, also supports Douyin|TikTok sharing links, for example: https://v.douyin.com/e4J8Q7A/.
+    - url: The URL address of the video or image, supports Douyin|TikTok|Bilibili sharing links, for example: https://v.douyin.com/e4J8Q7A/ or https://www.bilibili.com/video/BV1xxxxxxxxx
     - prefix: The prefix of the downloaded file, the default is True, and can be modified in the configuration file.
     - with_watermark: Whether to download videos or images with watermarks, the default is False.
     - naming: Custom filename (without extension), if provided, it will override the default naming rule.
@@ -133,7 +135,7 @@ async def download_file_hybrid(request: Request,
     try:
         data_type = data.get('type')
         platform = data.get('platform')
-        aweme_id = data.get('aweme_id')
+        video_id = data.get('video_id')  # 改为使用video_id
         file_prefix = config.get("API").get("Download_File_Prefix") if prefix else ''
         download_path = os.path.join(config.get("API").get("Download_Path"), f"{platform}_{data_type}")
 
@@ -164,12 +166,33 @@ async def download_file_hybrid(request: Request,
             # 获取视频文件
             __headers = await HybridCrawler.TikTokWebCrawler.get_tiktok_headers() if platform == 'tiktok' else await HybridCrawler.DouyinWebCrawler.get_douyin_headers()
 
-            success = await fetch_data_stream(url, request, headers=__headers, file_path=file_path)
-            if not success:
-                raise HTTPException(
-                    status_code=500,
-                    detail="An error occurred while fetching data"
-                )
+            # Bilibili 特殊处理：音视频分离
+            if platform == 'bilibili':
+                video_data = data.get('video_data', {})
+                video_url = video_data.get('nwm_video_url_HQ') if not with_watermark else video_data.get('wm_video_url_HQ')
+                audio_url = video_data.get('audio_url')
+                if not video_url or not audio_url:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to get video or audio URL from Bilibili"
+                    )
+                
+                # 使用专门的函数合并音视频
+                success = await merge_bilibili_video_audio(video_url, audio_url, request, file_path, __headers.get('headers'))
+                if not success:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to merge Bilibili video and audio streams"
+                    )
+            else:
+                # 其他平台的常规处理
+                url = data.get('video_data').get('nwm_video_url_HQ') if not with_watermark else data.get('video_data').get('wm_video_url_HQ')
+                success = await fetch_data_stream(url, request, headers=__headers, file_path=file_path)
+                if not success:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="An error occurred while fetching data"
+                    )
 
             # 返回文件内容，使用自定义文件名
             return FileResponse(path=file_path, filename=file_name, media_type="video/mp4")
