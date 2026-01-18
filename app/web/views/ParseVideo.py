@@ -2,10 +2,12 @@ import asyncio
 import os
 import time
 import re
+import urllib.parse
 
 import yaml
 from pywebio.input import *
 from pywebio.output import *
+from pywebio.session import run_js
 from pywebio_battery import put_video
 
 from app.web.views.ViewsUtils import ViewsUtils
@@ -79,98 +81,151 @@ def sanitize_filename(filename: str) -> str:
     """
     清理文件名，移除或替换非法字符
     """
+    if not filename:
+        return "video"
+    
+    # 移除换行符、制表符等控制字符
+    filename = re.sub(r'[\r\n\t\v\f]', ' ', filename)
+    
     # 移除或替换Windows和Unix系统中的非法字符
     illegal_chars = r'[<>:"/\\|?*]'
-    # 将非法字符替换为下划线
     filename = re.sub(illegal_chars, '_', filename)
+    
+    # 移除其他可能导致问题的字符
+    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
+    
     # 移除前后空格
     filename = filename.strip()
+    
+    # 将多个空格替换为单个空格
+    filename = re.sub(r'\s+', ' ', filename)
+    
     # 限制文件名长度（避免过长）
     if len(filename) > 200:
-        filename = filename[:200]
+        filename = filename[:200].strip()
+    
     # 如果清理后为空，使用默认名称
     if not filename:
         filename = "video"
+    
     return filename
 
 
-# 批量下载视频函数
-async def download_all_videos(video_info_list):
+# 批量下载视频函数 - 纯同步版本
+def batch_download_videos(video_info_list):
     """
-    异步批量下载所有视频
+    批量下载所有视频（纯同步版本）
     video_info_list: 包含视频信息的列表 [{'url': url, 'desc': desc, 'type': type}, ...]
     """
-    with use_scope('download_progress', clear=True):
-        put_markdown(f"### {ViewsUtils.t('正在准备下载...', 'Preparing to download...')}")
-        
+    try:
         # 过滤出只有视频的项
         video_items = [item for item in video_info_list if item['type'] == ViewsUtils.t('视频', 'Video')]
         
         if not video_items:
-            put_warning(ViewsUtils.t('没有找到可下载的视频！', 'No videos found to download!'))
+            toast(ViewsUtils.t('没有找到可下载的视频！', 'No videos found to download!'), color='warn')
             return
         
         total = len(video_items)
-        put_markdown(f"**{ViewsUtils.t('准备下载', 'Ready to download')} {total} {ViewsUtils.t('个视频', 'videos')}**")
-        put_html('<br>')
         
-        # 创建下载任务
-        put_markdown(ViewsUtils.t('### 📥 开始下载，请在浏览器下载管理器中查看进度...', 
-                                  '### 📥 Download started, please check progress in browser download manager...'))
+        # 显示下载信息界面（先显示UI）
+        clear('download_progress')
+        with use_scope('download_progress'):
+            put_markdown(f"### {ViewsUtils.t('📥 批量下载已启动', '📥 Batch Download Started')}")
+            put_html('<br>')
+            put_loading()
+            put_text(ViewsUtils.t('正在准备下载...', 'Preparing downloads...'))
         
-        # 使用JavaScript触发多个下载
-        download_script = ""
+        # 构建下载链接列表和JavaScript代码
+        download_links = []
+        js_code_parts = []
+        
         for idx, item in enumerate(video_items, 1):
-            url = item['url']
-            desc = item['desc']
+            url_val = item['url']
+            desc_val = item['desc']
             
             # 清理描述作为文件名
-            clean_desc = sanitize_filename(desc)
+            clean_desc = sanitize_filename(desc_val)
             
-            # URL编码文件名，避免特殊字符问题
-            import urllib.parse
+            # URL编码用于API调用
             encoded_filename = urllib.parse.quote(clean_desc)
+            encoded_url = urllib.parse.quote(url_val)
             
-            # 构建下载链接，将自定义文件名作为参数传递
-            download_url = f"/api/download?url={urllib.parse.quote(url)}&prefix=false&with_watermark=false&naming={encoded_filename}"
+            # 构建下载链接
+            download_url = f"/api/download?url={encoded_url}&prefix=false&with_watermark=false&naming={encoded_filename}"
+            download_links.append({'index': idx, 'filename': f"{clean_desc}.mp4", 'url': download_url})
             
-            # 添加延迟以避免浏览器阻止多个下载（每个下载间隔100ms）
-            delay = idx * 100
-            download_script += f"""
+            # 为JavaScript准备安全的文件名：使用JSON.stringify确保安全
+            # 将Python字符串转为JSON字符串（自动处理所有转义）
+            import json
+            safe_filename_json = json.dumps(f"{clean_desc}.mp4")
+            safe_url_json = json.dumps(download_url)
+            
+            # 添加延迟以避免浏览器阻止多个下载（每个下载间隔200ms）
+            delay = idx * 200
+            js_code_parts.append(f"""
                 setTimeout(function() {{
                     var link = document.createElement('a');
-                    link.href = '{download_url}';
-                    link.download = '{clean_desc}.mp4';
+                    link.href = {safe_url_json};
+                    link.download = {safe_filename_json};
+                    link.style.display = 'none';
                     document.body.appendChild(link);
                     link.click();
                     document.body.removeChild(link);
+                    console.log('下载触发: ' + {safe_filename_json});
                 }}, {delay});
-            """
+            """)
         
-        # 执行下载脚本
-        put_html(f"<script>{download_script}</script>")
+        # 合并所有JavaScript代码，包装在立即执行函数中
+        full_js_code = f"""
+        (function() {{
+            console.log('开始批量下载 {total} 个视频');
+            {' '.join(js_code_parts)}
+        }})();
+        """
         
-        # 显示下载列表
-        put_html('<br>')
-        put_markdown(f"### {ViewsUtils.t('下载列表:', 'Download list:')}")
+        # 执行下载
+        run_js(full_js_code)
         
-        download_table = [[ViewsUtils.t('序号', 'No.'), ViewsUtils.t('文件名', 'Filename')]]
-        for idx, item in enumerate(video_items, 1):
-            clean_desc = sanitize_filename(item['desc'])
-            download_table.append([idx, f"{clean_desc}.mp4"])
-        
-        put_table(download_table)
-        
-        put_html('<br>')
-        put_success(ViewsUtils.t(
-            f'✅ 已触发 {total} 个下载任务！请在浏览器的下载管理器中查看和管理下载。',
-            f'✅ Triggered {total} download tasks! Please check and manage downloads in your browser\'s download manager.'
-        ))
-        
-        put_info(ViewsUtils.t(
-            '💡 提示：部分浏览器可能会阻止多个文件同时下载，请在浏览器提示中允许多个下载。',
-            '💡 Tip: Some browsers may block multiple downloads. Please allow multiple downloads when prompted by your browser.'
-        ))
+        # 更新显示下载列表
+        clear('download_progress')
+        with use_scope('download_progress'):
+            put_markdown(f"### {ViewsUtils.t('📥 批量下载已启动', '📥 Batch Download Started')}")
+            put_html('<br>')
+            
+            # 显示下载列表
+            put_markdown(f"**{ViewsUtils.t('下载列表:', 'Download list:')}** ({total} {ViewsUtils.t('个视频', 'videos')})")
+            
+            download_table = [[ViewsUtils.t('序号', 'No.'), ViewsUtils.t('文件名', 'Filename')]]
+            for link_info in download_links:
+                download_table.append([link_info['index'], link_info['filename']])
+            
+            put_table(download_table)
+            
+            put_html('<br>')
+            put_success(ViewsUtils.t(
+                f'✅ 已触发 {total} 个下载任务！请在浏览器的下载管理器中查看和管理下载。',
+                f'✅ Triggered {total} download tasks! Please check and manage downloads in your browser\'s download manager.'
+            ))
+            
+            put_info(ViewsUtils.t(
+                '💡 提示：部分浏览器可能会阻止多个文件同时下载，请在浏览器提示中允许多个下载。',
+                '💡 Tip: Some browsers may block multiple downloads. Please allow multiple downloads when prompted by your browser.'
+            ))
+            
+            put_html('<br>')
+            put_button(
+                ViewsUtils.t('返回结果', 'Back to Results'),
+                onclick=lambda: scroll_to('result'),
+                color='success',
+                outline=True
+            )
+    except Exception as e:
+        # 错误处理
+        clear('download_progress')
+        with use_scope('download_progress'):
+            put_error(f"批量下载出错: {str(e)}")
+            import traceback
+            put_code(traceback.format_exc())
 
 
 def parse_video():
@@ -351,7 +406,7 @@ def parse_video():
             put_button(
                 ViewsUtils.t(f'📥 一键下载全部无水印视频 ({video_count}个)', 
                            f'📥 Download All No-Watermark Videos ({video_count})'), 
-                onclick=lambda: asyncio.run(download_all_videos(video_info_list)), 
+                onclick=lambda: batch_download_videos(video_info_list), 
                 color='primary', 
                 outline=True
             )
